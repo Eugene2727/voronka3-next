@@ -29,6 +29,9 @@ export default function SpecialPage() {
 	// Ссылки на функции и флаги
 	const sdkInitRef = useRef(false)
 	const submitCardRef = useRef<any>(null)
+	
+	// НОВЫЙ РЕФ ДЛЯ ХРАНЕНИЯ SDK (чтобы убивать его при ошибке)
+	const sdkInstanceRef = useRef<any>(null)
 
 	useEffect(() => {
 		// ЗАЩИТА: Если нет email - выгоняем на страницу ввода
@@ -70,16 +73,18 @@ export default function SpecialPage() {
 	}, [])
 
 	// ==========================================
-	// ИНИЦИАЛИЗАЦИЯ ПЛАТЕЖА И SDK
+	// ИНИЦИАЛИЗАЦИЯ ПЛАТЕЖА И СЕРВЕРНЫЙ REFRESH
 	// ==========================================
-	const preparePayment = async (targetEmail: string) => {
-		if (sdkInitRef.current) return
+	const preparePayment = async (targetEmail: string, forceRetry = false) => {
+		if (sdkInitRef.current && !forceRetry) return
 		sdkInitRef.current = true
 
-		setOverlayContent({
-			text: 'Securing payment connection...',
-			color: '#007bff',
-		})
+		if (!forceRetry) {
+			setOverlayContent({
+				text: 'Securing payment connection...',
+				color: '#007bff',
+			})
+		}
 
 		try {
 			const response = await fetch(
@@ -104,7 +109,8 @@ export default function SpecialPage() {
 				throw new Error('Failed to get transaction ID')
 			}
 
-			await initTruegateSDK(data.payment_widget.transactionId)
+			// Пробрасываем email дальше, чтобы в случае ошибки знать, кого рестартовать
+			await initTruegateSDK(data.payment_widget.transactionId, targetEmail)
 		} catch (error) {
 			sdkInitRef.current = false
 			setOverlayContent({
@@ -114,7 +120,7 @@ export default function SpecialPage() {
 		}
 	}
 
-	const initTruegateSDK = async (transactionId: string) => {
+	const initTruegateSDK = async (transactionId: string, targetEmail: string) => {
 		await new Promise<void>(resolve => {
 			if (window.truegateSdk) resolve()
 			else {
@@ -124,6 +130,20 @@ export default function SpecialPage() {
 			}
 		})
 
+		// 1. УБИВАЕМ СТАРЫЙ SDK, ЕСЛИ ОН БЫЛ
+		if (sdkInstanceRef.current) {
+			if (typeof sdkInstanceRef.current.destroy === 'function') {
+				try {
+					sdkInstanceRef.current.destroy()
+				} catch (e) {
+					console.warn('Destroy error:', e)
+				}
+			}
+			sdkInstanceRef.current = null
+			submitCardRef.current = null
+		}
+
+		// 2. СОЗДАЕМ НОВЫЙ SDK
 		const sdkInstance = new window.truegateSdk({
 			id: 'payment-instance',
 			transactionId: transactionId,
@@ -136,8 +156,20 @@ export default function SpecialPage() {
 				setErrorMsg('🎉 Payment successful! Redirecting...')
 				setTimeout(() => (window.location.href = '/thankyou'), 1500)
 			} else if (payload.details.status === 'FAILED') {
-				setErrorMsg('Payment declined by your bank. Try another card.')
-				resetPayButton()
+				// 3. ПРИ ОШИБКЕ: Сообщаем пользователю и запускаем рестарт формы
+				setErrorMsg('Payment declined. Generating a new secure form...')
+				setIsPayDisabled(true)
+				setPayBtnText('Reloading...')
+
+				setTimeout(() => {
+					setErrorMsg('')
+					setOverlayContent({
+						text: 'Regenerating secure connection...',
+						color: '#007bff',
+					})
+					setIsOverlayHidden(false) // Возвращаем белый оверлей на поля ввода
+					preparePayment(targetEmail, true) // forceRetry = true
+				}, 1500)
 			}
 		})
 
@@ -147,6 +179,9 @@ export default function SpecialPage() {
 		})
 
 		await sdkInstance.init()
+		
+		// 4. СОХРАНЯЕМ ИНСТАНС ДЛЯ БУДУЩИХ УДАЛЕНИЙ
+		sdkInstanceRef.current = sdkInstance
 
 		try {
 			// Дополнительная очистка контейнеров перед вставкой
@@ -169,7 +204,6 @@ export default function SpecialPage() {
 					PLACEHOLDER_CARD_NUMBER: '0000 0000 0000 0000',
 					PLACEHOLDER_EXPIRATION: 'MM / YY',
 					PLACEHOLDER_SECURITY_CODE: 'CVC',
-					// Пытаемся убрать стрелочки безопасно (без поломки ширины)
 					CUSTOM_CSS: `
 						input[type="number"]::-webkit-outer-spin-button,
 						input[type="number"]::-webkit-inner-spin-button {
@@ -184,8 +218,10 @@ export default function SpecialPage() {
 			})
 			submitCardRef.current = result.submit
 
+			// Форма загружена успешно — прячем оверлей и активируем кнопку
 			setIsOverlayHidden(true)
 			setIsPayDisabled(false)
+			setPayBtnText('PAY')
 		} catch (e) {
 			console.error('SDK Fields Init Error', e)
 		}
